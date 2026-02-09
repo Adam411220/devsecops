@@ -1,8 +1,6 @@
 name: DevSecOps Comprehensive Scan
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -25,4 +23,23 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      # Tutaj w przyszłości dodasz kroki: Build Docker oraz Skan Trivy
+      # 2. SKANOWANIE ZALEŻNOŚCI (SCA) - Trivy filesystem scan
+      - name: Trivy FS Scan (pre-build)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      # 3. BUDOWANIE OBRAZU DOCKER
+      - name: Build Docker image
+        run: docker build -t devsecops-app:${{ github.sha }} .
+
+      # 4. SKANOWANIE OBRAZU (Container Security) - Trivy image scan
+      - name: Trivy Image Scan (post-build)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'devsecops-app:${{ github.sha }}'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
