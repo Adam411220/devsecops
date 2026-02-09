@@ -9,26 +9,21 @@ app = Flask(__name__)
 # Pobieramy je ze zmiennej środowiskowej systemu.
 app.config['KEY'] = os.getenv('MY_APP', 'dev-key-placeholder')
 
-@app.route('/user')
+# NAPRAWA: Dodajemy metody HTTP tutaj
+@app.route('/user', methods=['GET'])
 def get_user():
-    # Pobieranie ID z parametrów URL (np. /user?id=1)
     user_id = request.args.get('id')
-    
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    
-    # SQL Injection naprawione - używamy bezpiecznych parametrów (?)
     query = "SELECT username FROM users WHERE id = ?"
     cursor.execute(query, (user_id,))
-    
     user = cursor.fetchone()
     return f"Użytkownik: {user}"
 
-@app.route('/debug')
+# NAPRAWA: I tutaj też
+@app.route('/debug', methods=['GET'])
 def debug():
-    # To zostanie jako 'Maintainability Medium', ale nie powinno blokować builda
-    return "App is running in safe mode"
+    return "App is running"
 
 if __name__ == '__main__':
-    # Usunięto host='0.0.0.0' - teraz odpala się bezpiecznie na localhost
     app.run()
