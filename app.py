@@ -7,7 +7,7 @@ app = Flask(__name__)
 # --- NAPRAWA BLOCKERA ---
 # Sonar nie widzi już hasła wpisanego "na sztywno". 
 # Pobieramy je ze zmiennej środowiskowej systemu.
-app.config['SECRET_KEY'] = os.getenv('MY_APP_SECRET', 'dev-key-placeholder')
+app.config['KEY'] = os.getenv('MY_APP', 'dev-key-placeholder')
 
 @app.route('/user')
 def get_user():
