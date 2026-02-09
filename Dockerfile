@@ -7,8 +7,7 @@ WORKDIR /app
 RUN pip install --user flask
 
 # ETAP 2: Produkcja (Final)
-# Możesz tu użyć jeszcze mniejszego obrazu, np. python:3.10-alpine lub distroless
-FROM python:3.10-slim
+FROM python:3.10-alpine
 
 WORKDIR /app
 
@@ -20,7 +19,7 @@ COPY app.py .
 ENV PATH=/home/myuser/.local/bin:$PATH
 
 # Bezpieczeństwo: tworzymy użytkownika
-RUN useradd -m myuser
+RUN adduser -D myuser
 USER myuser
 
 # Ostatni szlif: Sonar i Trivy będą zachwycone tym obrazem

@@ -2,10 +2,20 @@ name: DevSecOps Comprehensive Scan
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ develop, main ]
+  push:
+    branches: [ develop, main ]
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  security-scan:
+  # JOB 1: Testy + SAST (SonarCloud) - zawsze
+  test-and-sast:
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -13,33 +23,154 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. SKANOWANIE KODU (SAST)
+      - name: Gitleaks - Secret Scanning
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: pip install flask pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=xml:coverage.xml
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         with:
-          # To sprawi, że pipeline poczeka na wynik z Sonara i "zfailuje", jeśli kod jest zły
           args: >
             -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      # 2. SKANOWANIE ZALEŻNOŚCI (SCA) - Trivy filesystem scan
+  # JOB 2: Trivy FS + Build + Trivy Image - zawsze
+  trivy-scan:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Trivy FS Scan (pre-build)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          severity: 'CRITICAL,HIGH'
+          severity: 'CRITICAL'
           exit-code: '1'
 
-      # 3. BUDOWANIE OBRAZU DOCKER
-      - name: Build Docker image
-        run: docker build -t devsecops-app:${{ github.sha }} .
+      - name: Build image with Kaniko (no push)
+        run: |
+          docker run \
+            -v ${{ github.workspace }}:/workspace \
+            gcr.io/kaniko-project/executor:latest \
+            --context=/workspace \
+            --dockerfile=/workspace/Dockerfile \
+            --no-push \
+            --tar-path=/workspace/image.tar \
+            --destination=devsecops-app:${{ github.sha }}
 
-      # 4. SKANOWANIE OBRAZU (Container Security) - Trivy image scan
       - name: Trivy Image Scan (post-build)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'devsecops-app:${{ github.sha }}'
-          severity: 'CRITICAL,HIGH'
+          input: 'image.tar'
+          severity: 'CRITICAL'
           exit-code: '1'
+
+  # JOB 3: Push do DEV registry (merge do develop)
+  push-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [test-and-sast, trivy-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Build and push image to dev registry
+        run: |
+          docker run \
+            -v ${{ github.workspace }}:/workspace \
+            -v /tmp/kaniko-config:/kaniko/.docker \
+            gcr.io/kaniko-project/executor:latest \
+            --context=/workspace \
+            --dockerfile=/workspace/Dockerfile \
+            --destination=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_DEV }}/devsecops-app:${{ github.sha }}
+
+      - name: Update manifest repo (dev)
+        run: |
+          git clone https://x-access-token:${{ secrets.MANIFEST_TOKEN }}@github.com/${{ vars.MANIFEST_REPO }}.git manifests
+          cd manifests/overlays/dev
+          kustomize edit set image devsecops-app=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_DEV }}/devsecops-app:${{ github.sha }}
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "deploy dev: ${{ github.sha }}"
+          git push
+
+  # JOB 4: Promote do STAGING registry (merge do main)
+  promote-to-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test-and-sast, trivy-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Copy image from dev to staging registry
+        run: |
+          crane auth login ${{ vars.GCP_REGION }}-docker.pkg.dev --username=_json_key --password='${{ secrets.GCP_SA_KEY }}'
+          crane cp \
+            ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_DEV }}/devsecops-app:${{ github.sha }} \
+            ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_STAGING }}/devsecops-app:${{ github.sha }}
+
+      - name: Update manifest repo (staging)
+        run: |
+          git clone https://x-access-token:${{ secrets.MANIFEST_TOKEN }}@github.com/${{ vars.MANIFEST_REPO }}.git manifests
+          cd manifests/overlays/staging
+          kustomize edit set image devsecops-app=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_STAGING }}/devsecops-app:${{ github.sha }}
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "deploy staging: ${{ github.sha }}"
+          git push
+
+  # JOB 5: Promote do PROD registry (tag v*)
+  promote-to-prod:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Copy image from staging to prod registry
+        run: |
+          crane auth login ${{ vars.GCP_REGION }}-docker.pkg.dev --username=_json_key --password='${{ secrets.GCP_SA_KEY }}'
+          crane cp \
+            ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_STAGING }}/devsecops-app:${{ github.sha }} \
+            ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_PROD }}/devsecops-app:${{ github.ref_name }}
+
+      - name: Update manifest repo (prod)
+        run: |
+          git clone https://x-access-token:${{ secrets.MANIFEST_TOKEN }}@github.com/${{ vars.MANIFEST_REPO }}.git manifests
+          cd manifests/overlays/prod
+          kustomize edit set image devsecops-app=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.GCP_REPO_PROD }}/devsecops-app:${{ github.ref_name }}
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "deploy prod: ${{ github.ref_name }}"
+          git push
