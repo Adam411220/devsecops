@@ -15,10 +15,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. SKANOWANIE KODU (SAST) - SonarCloud patrzy w app.py
+      # 1. SKANOWANIE KODU (SAST)
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
+        with:
+          # To sprawi, że pipeline poczeka na wynik z Sonara i "zfailuje", jeśli kod jest zły
+          args: >
+            -Dsonar.qualitygate.wait=true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+      # Tutaj w przyszłości dodasz kroki: Build Docker oraz Skan Trivy
