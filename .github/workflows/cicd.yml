@@ -5,7 +5,8 @@ on:
     branches: [ main ]
 
 jobs:
-  security-scan:
+  # JOB 1: Testy + Coverage (wymagany przez oba kolejne joby)
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -13,17 +14,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. SKANOWANIE KODU (SAST)
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
-        with:
-          # To sprawi, że pipeline poczeka na wynik z Sonara i "zfailuje", jeśli kod jest zły
-          args: >
-            -Dsonar.qualitygate.wait=true
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Install dependencies
+        run: pip install flask pytest pytest-cov
 
-      # 2. SKANOWANIE ZALEŻNOŚCI (SCA) - Trivy filesystem scan
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  # JOB 2: Trivy FS + Docker Build + Trivy Image (równolegle z Sonarem)
+  trivy-scan:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # SKANOWANIE ZALEŻNOŚCI (SCA)
       - name: Trivy FS Scan (pre-build)
         uses: aquasecurity/trivy-action@master
         with:
@@ -32,11 +43,11 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
-      # 3. BUDOWANIE OBRAZU DOCKER
+      # BUDOWANIE OBRAZU DOCKER
       - name: Build Docker image
         run: docker build -t devsecops-app:${{ github.sha }} .
 
-      # 4. SKANOWANIE OBRAZU (Container Security) - Trivy image scan
+      # SKANOWANIE OBRAZU (Container Security)
       - name: Trivy Image Scan (post-build)
         uses: aquasecurity/trivy-action@master
         with:
@@ -44,3 +55,25 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
+  # JOB 3: SonarCloud SAST (równolegle z Trivy)
+  sonar-scan:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
